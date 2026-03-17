@@ -1,21 +1,16 @@
 // ============================================================
-//  Vespa Clock Firmware
+//  Vespa Clock Firmware v1
 //  Hardware: ESP32-C3 SuperMini
 //  Display:  Sharp Memory LCD 160x68 (Adafruit_SharpMem)
 //  RTC:      DS3231 (RTClib)
 //  Button A: GPIO 5  (mode advance)
 //  Button B: GPIO 10 (value change)
-//  BLE:      Current Time Service (CTS) — iOS auto-sync
 // ============================================================
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_SharpMem.h>
 #include <Preferences.h>
 #include <RTClib.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
 #include "constants.h"
 
 // ── Display ─────────────────────────────────────────────────
@@ -78,114 +73,6 @@ int  lastDisplayedHour   = -1;
 bool forceRedraw         = true;
 
 // ============================================================
-//  BLE CTS
-// ============================================================
-#define CTS_SERVICE_UUID       "00001805-0000-1000-8000-00805f9b34fb"
-#define CTS_CURRENT_TIME_UUID  "00002a2b-0000-1000-8000-00805f9b34fb"
-#define CTS_LOCAL_TIME_UUID    "00002a0f-0000-1000-8000-00805f9b34fb"
-
-BLEServer*         bleServer      = nullptr;
-BLECharacteristic* bleCurrentTime = nullptr;
-bool               bleConnected   = false;
-
-void packCurrentTime(uint8_t* buf) {
-  DateTime now = rtc.now();
-  buf[0] = now.year() & 0xFF;
-  buf[1] = (now.year() >> 8) & 0xFF;
-  buf[2] = now.month();
-  buf[3] = now.day();
-  buf[4] = now.hour();
-  buf[5] = now.minute();
-  buf[6] = now.second();
-  buf[7] = now.dayOfTheWeek() == 0 ? 7 : now.dayOfTheWeek();
-  buf[8] = 0;
-  buf[9] = 0;
-}
-
-void applyCurrentTime(const uint8_t* buf, size_t len) {
-  if (len < 7) return;
-  uint16_t year   = buf[0] | (buf[1] << 8);
-  uint8_t  month  = buf[2];
-  uint8_t  day    = buf[3];
-  uint8_t  hour   = buf[4];
-  uint8_t  minute = buf[5];
-  uint8_t  second = buf[6];
-  if (year < 2020 || year > 2100) return;
-  if (month < 1   || month > 12)  return;
-  if (day   < 1   || day   > 31)  return;
-  if (hour  > 23)                 return;
-  if (minute > 59)                return;
-  if (second > 59)                return;
-  rtc.adjust(DateTime(year, month, day, hour, minute, second));
-  Serial.println("BLE: RTC synced from iOS CTS");
-}
-
-class CTSCharacteristicCallbacks : public BLECharacteristicCallbacks {
-  void onRead(BLECharacteristic* pChar) override {
-    uint8_t buf[10];
-    packCurrentTime(buf);
-    pChar->setValue(buf, 10);
-    Serial.println("BLE: Current Time read by client");
-  }
-   void onWrite(BLECharacteristic* pChar) override {
-    String val = pChar->getValue();
-    applyCurrentTime((const uint8_t*)val.c_str(), val.length());
-  }
-};
-
-class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) override {
-    bleConnected = true;
-    Serial.println("BLE: Client connected");
-  }
-  void onDisconnect(BLEServer* pServer) override {
-    bleConnected = false;
-    Serial.println("BLE: Client disconnected — restarting advertising");
-    pServer->getAdvertising()->start();
-  }
-};
-
-void setupBLE() {
-  BLEDevice::init("Vespa Clock");
-  BLESecurity* bleSecurity = new BLESecurity();
-  bleSecurity->setAuthenticationMode(ESP_LE_AUTH_BOND);
-  bleSecurity->setCapability(ESP_IO_CAP_NONE);
-  bleSecurity->setKeySize(16);
-  bleSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-  bleServer = BLEDevice::createServer();
-  bleServer->setCallbacks(new ServerCallbacks());
-
-  BLEService* ctsService = bleServer->createService(CTS_SERVICE_UUID);
-
-  bleCurrentTime = ctsService->createCharacteristic(
-    CTS_CURRENT_TIME_UUID,
-    BLECharacteristic::PROPERTY_READ   |
-    BLECharacteristic::PROPERTY_NOTIFY |
-    BLECharacteristic::PROPERTY_WRITE
-  );
-  bleCurrentTime->setCallbacks(new CTSCharacteristicCallbacks());
-  bleCurrentTime->addDescriptor(new BLE2902());
-
-  BLECharacteristic* localTime = ctsService->createCharacteristic(
-    CTS_LOCAL_TIME_UUID,
-    BLECharacteristic::PROPERTY_READ
-  );
-  uint8_t localTimeBuf[2] = { 0x00, 0x00 };
-  localTime->setValue(localTimeBuf, 2);
-
-  ctsService->start();
-
-  BLEAdvertising* advertising = BLEDevice::getAdvertising();
-  advertising->addServiceUUID(CTS_SERVICE_UUID);
-  advertising->setScanResponse(true);
-  advertising->setMinPreferred(0x06);
-  advertising->setMinPreferred(0x12);
-  BLEDevice::startAdvertising();
-
-  Serial.println("BLE: Advertising as 'Vespa Clock'");
-}
-
-// ============================================================
 //  SETUP
 // ============================================================
 void setup() {
@@ -236,7 +123,6 @@ void setup() {
   display.refresh();
 
   loadPreferences();
-  setupBLE();
   enterMode(MODE_CLOCK);
 }
 
@@ -511,7 +397,7 @@ void drawTemperature(float temp) {
   int hundreds = abstemp / 100;
   int tens     = (abstemp / 10) % 10;
   int ones     = abstemp % 10;
-  drawCustomSegments(DIGIT_3_X, LCD_Y_OFFSET, 0b1100011);  // degree symbol
+  drawCustomSegments(DIGIT_3_X, LCD_Y_OFFSET, 0b1100011);
   drawDigit(DIGIT_2_X, LCD_Y_OFFSET, ones);
   if (abstemp >= 10 || hundreds > 0) {
     drawDigit(DIGIT_1_X, LCD_Y_OFFSET, tens);
@@ -519,7 +405,7 @@ void drawTemperature(float temp) {
   if (hundreds > 0) {
     drawDigit(DIGIT_0_X, LCD_Y_OFFSET, hundreds);
   } else if (negative) {
-    drawCustomSegments(DIGIT_0_X, LCD_Y_OFFSET, 0b0000001);  // minus
+    drawCustomSegments(DIGIT_0_X, LCD_Y_OFFSET, 0b0000001);
   }
 }
 
@@ -599,9 +485,9 @@ void drawLetterInDigit(int x, int y, char c) {
     case 'E': segs = 0b1001111; break;
     case 'F': segs = 0b1000110; break;
     case 'H': segs = 0b0110111; break;
-    case 'P': segs = 0b1100110; break;
-    case 'T': segs = 0b0001111; break;  // lowercase t
-    default:  segs = 0b0000001; break;  // minus
+    case 'P': segs = 0b1100111; break;
+    case 'T': segs = 0b0001111; break;
+    default:  segs = 0b0000001; break;
   }
   drawCustomSegments(x, y, segs);
 }
